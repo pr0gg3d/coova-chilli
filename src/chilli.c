@@ -4463,8 +4463,12 @@ int cb_radius_auth_conf(struct radius_t *radius,
     if (_options.noradallow) {
       session_param_defaults(&appconn->s_params);
       return upprot_getip(appconn, &appconn->reqip, 0);
+    } else if ((appconn->dnprot == DNPROT_MAC) && (_options.strictmacauth)) {
+      appconn->dnprot == DNPROT_NONE;
+      return 0;
+    } else {
+      return dnprot_reject(appconn);
     }
-    return dnprot_reject(appconn);
   }
 
 #if(_debug_)
@@ -4949,7 +4953,7 @@ int cb_radius_coa_ind(struct radius_t *radius, struct radius_packet_t *pack,
 /* In the case of WPA it is allready allocated,
  * for UAM address is allocated before authentication */
 int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
-		    uint8_t *dhcp_pkt, size_t dhcp_len) {
+      uint8_t *dhcp_pkt, size_t dhcp_len) {
   struct app_conn_t *appconn = conn->peer;
   struct ippoolm_t *ipm = 0;
   char domacauth = (char) _options.macauth;
@@ -4974,14 +4978,16 @@ int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
     }
 
     if (_options.uamanyipex_addr.s_addr &&
-	(addr->s_addr & _options.uamanyipex_mask.s_addr) ==
-	_options.uamanyipex_addr.s_addr) {
+        (addr->s_addr & _options.uamanyipex_mask.s_addr) ==
+        _options.uamanyipex_addr.s_addr) {
       return -1;
     }
 
     if ((addr->s_addr & ipv4ll_mask.s_addr) == ipv4ll_ip.s_addr) {
-      /* clients with an IPv4LL ip normally have no default gw assigned, rendering uamanyip useless
-	 They must rather get a proper dynamic ip via dhcp */
+      /* clients with an IPv4LL ip normally have no default gw assigned,
+       * rendering uamanyip useless.
+      * They must rather get a proper dynamic ip via dhcp
+      */
       if (_options.debug)
         syslog(LOG_DEBUG, "IPv4LL/APIPA address requested, ignoring %s",
                inet_ntoa(*addr));
@@ -5005,60 +5011,76 @@ int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
     if ( ! conn->is_reserved) {
 
       if ((_options.macoklen) &&
-	  (appconn->dnprot == DNPROT_DHCP_NONE) &&
-	  !maccmp(conn->hismac)) {
+          (appconn->dnprot == DNPROT_DHCP_NONE) &&
+          !maccmp(conn->hismac)) {
 
-	/*
-	 *  When using macallowed option, and hismac matches.
-	 */
-	appconn->dnprot = DNPROT_MAC;
+        /*
+         *  When using macallowed option, and hismac matches.
+         */
+        appconn->dnprot = DNPROT_MAC;
 
-	if (_options.macallowlocal) {
-	  char mac[MACSTRLEN+1];
+        if (_options.macallowlocal) {
+          char mac[MACSTRLEN+1];
 
-	  snprintf(mac, sizeof(mac), MAC_FMT, MAC_ARG(conn->hismac));
+          snprintf(mac, sizeof(mac), MAC_FMT, MAC_ARG(conn->hismac));
 
-	  strlcpy(appconn->s_state.redir.username, mac, USERNAMESIZE);
+          strlcpy(appconn->s_state.redir.username, mac, USERNAMESIZE);
 
-	  if (_options.macsuffix) {
-	    size_t ulen = strlen(appconn->s_state.redir.username);
-	    strlcpy(appconn->s_state.redir.username + ulen,
-                    _options.macsuffix, USERNAMESIZE - ulen);
-	  }
+          if (_options.macsuffix) {
+            size_t ulen = strlen(appconn->s_state.redir.username);
+            strlcpy(appconn->s_state.redir.username + ulen,
+                          _options.macsuffix, USERNAMESIZE - ulen);
+          }
 
-	  /*
-	   *  Local MAC allowed list, authenticate without RADIUS.
-	   */
-	  upprot_getip(appconn, &appconn->reqip, 0);
+          /*
+           *  Local MAC allowed list, authenticate without RADIUS.
+           */
+          upprot_getip(appconn, &appconn->reqip, 0);
 
-	  syslog(LOG_INFO, "Granted MAC=%s with IP=%s access without radius auth",
-                 mac, inet_ntoa(appconn->hisip));
+          syslog(LOG_INFO, "Granted MAC=%s with IP=%s access without radius auth",
+                       mac, inet_ntoa(appconn->hisip));
 
-	  ipm = (struct ippoolm_t*) appconn->uplink;
-	  domacauth = 0;
+          ipm = (struct ippoolm_t*) appconn->uplink;
+          domacauth = 0;
 
-	} else {
-	  /*
-	   *  Otherwise, authenticate with RADIUS.
-	   */
-	  auth_radius(appconn, 0, 0, dhcp_pkt, dhcp_len);
+        } else {
+          /*
+           *  Otherwise, authenticate with RADIUS.
+           */
+          auth_radius(appconn, 0, 0, dhcp_pkt, dhcp_len);
 
-	  allocate = !_options.strictmacauth;
-	  domacauth = 0;
-	}
+          allocate = !_options.strictmacauth;
+          domacauth = 0;
+        }
 
-      } else if ((_options.macauth) &&
-		 (appconn->dnprot == DNPROT_DHCP_NONE)) {
+      } else if (_options.macauth) {
 
-	/*
-	 *  Using macauth option to authenticate via RADIUS.
-	 */
-	appconn->dnprot = DNPROT_MAC;
+        if (appconn->dnprot == DNPROT_DHCP_NONE) {
+          /*
+           *  Using macauth option to authenticate via RADIUS.
+           */
+          appconn->dnprot = DNPROT_MAC;
+          allocate = !_options.strictmacauth;
+          domacauth = 0;
 
-	auth_radius(appconn, 0, 0, dhcp_pkt, dhcp_len);
+          if (auth_radius(appconn, 0, 0, dhcp_pkt, dhcp_len) < 0) {
+            /* 
+             *  We can't queue the radius packet so we can't take a decision
+             */
+            appconn->dnprot = DNPROT_DHCP_NONE;
+          }
 
-	allocate = !_options.strictmacauth;
-	domacauth = 0;
+        } else if (appconn->dnprot == DNPROT_MAC) {
+
+          dhcpconn = (struct dhcp_conn_t *) appconn->dnlink;
+          if (dhcpconn && dhcpconn->authstate == DHCP_AUTH_NONE) {
+            /*
+             *  Still wait response from radius
+             */
+            allocate = !_options.strictmacauth;
+            domacauth = 0;
+          }
+        }
       }
     }
   }
